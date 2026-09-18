@@ -84,3 +84,67 @@ A production-grade, centralized error handling and resilience engine built for *
   "status": "queued",
   "created_at": "2026-09-18T13:58:38.996Z"
 }
+
+## 🚨 Error Routing & Handling Rules
+
+| Error Type / Status | Classification | System Action | Target Destination |
+| :--- | :--- | :--- | :--- |
+| 🔄 **HTTP 429 / 5xx** | Rate Limits / Server Errors | Auto-Calculate Backoff & Queue for Retry | `Retry Queue` |
+| 🚫 **HTTP 400 / Bad Payload** | Invalid Request / Schema Mismatch | Mark Non-Retryable & Route Directly to DLQ | `Dead-Letter Queue` |
+| 🔐 **HTTP 401 / 403** | Auth Failure / Invalid Credentials | Trigger Critical Email Alert & Move to DLQ | `DLQ + Critical Alert` |
+| ⚠️ **Unsafe Action** | Mutation / SMS / Payment Trigger | Mark Unsafe (`retry_safe: false`) & Bypass Retry | `Dead-Letter Queue` |
+| 🔁 **Exhausted Attempts** | Retries Exceeded Max Limit (>4) | Update Status to `exhausted` | `Dead-Letter Queue` |
+
+## 🔄 Execution Workflow Pipeline
+
+| Step | Phase | Action / Node Executed | Description |
+| :---: | :--- | :--- | :--- |
+| **01** | **Ingestion** | `Error Trigger` | Listens for workflow failures across connected n8n pipelines. |
+| **02** | **Normalization** | `Normalize Error Payload` | Extracts error details and builds a standardized JSON schema. |
+| **03** | **Fingerprinting** | `Create Error Fingerprint` | Runs regex filters to produce a unique signature (`error_fingerprint`). |
+| **04** | **Safety Check** | `Determine Retry Safety` | Validates if the operation is safe to replay without side effects. |
+| **05** | **Dedup Check** | `Check 30-Minute Window` | Queries historical logs to suppress duplicate alerts within 30 minutes. |
+| **06** | **Routing** | `Retry Safe?` | Routes safe transient errors to Retry Queue and permanent failures to DLQ. |
+| **07** | **Replay Loop** | `Retry Worker` | Cron-triggered worker pulls due retries (`next_retry_at <= NOW()`) and executes sub-workflow. |
+| **08** | **Reporting** | `Daily Reliability Digest` | Runs daily to summarize system health, recovery rates, and DLQ metrics via Gmail. |
+
+## 🛠️ Tech Stack & Integration Ecosystem
+
+| Tool / Technology | Role in Workflow |
+| :--- | :--- |
+| ⚡ **n8n** | Orchestration engine, sub-workflow executions, error capturing, and conditional routing |
+| 📊 **Google Sheets API** | System state logging, active retry queue management, and Dead-Letter database persistence |
+| 📧 **Gmail API** | Real-time critical error notifications and daily executive digest delivery |
+| 📜 **JavaScript (ES6+)** | Regex normalization, dynamic fingerprinting, backoff calculation, and payload parsing |
+
+---
+
+## 💡 Practical Use Cases
+
+| Business Scenario | Problem Solved | Operational Impact |
+| :--- | :--- | :--- |
+| **Notification Spam Suppression** | Hundreds of identical emails during API downtime | Mutes duplicate alerts for 30 minutes while capturing all errors in logs |
+| **Transient API Recovery** | Temporary 503 service outages breaking integrations | Auto-recovers failed runs via exponential backoff retries without human intervention |
+| **Safe Payment & SMS Handling** | Risk of double-charging customers or re-sending SMS on retry | Intelligently isolates unsafe mutations directly to DLQ for manual audit |
+
+## 🚀 Setup & Execution Guide
+
+| Step | Task | Details |
+| :---: | :--- | :--- |
+| **01** | **Import Workflow** | Open n8n ➔ Click **Import from file** ➔ Select `workflows/central-reliability-system.json`. |
+| **02** | **Configure Credentials** | Connect **Google Sheets API** and **Gmail OAuth2 / SMTP** credentials. |
+| **03** | **Setup Google Sheet** | Create target Google Sheet with tabs: `ErrorLog`, `RetryQueue`, `DeadLetterQueue`, and `DailyDigest`. |
+| **04** | **Attach Error Trigger** | Configure your primary automations' Error Workflow setting to point to this central workflow. |
+| **05** | **Activate System** | Toggle workflow status to **Active** to begin automated error tracking and retries. |
+
+## 📜 License
+
+MIT License — Free to use, modify, and deploy for personal or commercial projects.
+
+
+
+
+
+
+
+
