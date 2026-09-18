@@ -85,14 +85,15 @@ A production-grade, centralized error handling and resilience engine built for *
   "created_at": "2026-09-18T13:58:38.996Z"
 }
 
-🚨 Error Routing & Handling Rules
+## 🚨 Error Routing & Handling Rules
 
-Error Type / Status,Classification,System Action,Target Destination
-🔄 HTTP 429 / 5xx,Rate Limits / Server Errors,Auto-Calculate Backoff & Queue for Retry,Retry Queue
-🚫 HTTP 400 / Bad Payload,Invalid Request / Schema Mismatch,Mark Non-Retryable & Route Directly to DLQ,Dead-Letter Queue
-🔐 HTTP 401 / 403,Auth Failure / Invalid Credentials,Trigger Critical Email Alert & Move to DLQ,DLQ + Critical Alert
-⚠️ Unsafe Action,Mutation / SMS / Payment Trigger,Mark Unsafe (retry_safe: false) & Bypass Retry,Dead-Letter Queue
-🔁 Exhausted Attempts,Retries Exceeded Max Limit (>4),Update Status to exhausted,Dead-Letter Queue
+| Error Type / Status | Classification | System Action | Target Destination |
+| :--- | :--- | :--- | :--- |
+| 🔄 **HTTP 429 / 5xx** | Rate Limits / Server Errors | Auto-Calculate Backoff & Queue for Retry | `Retry Queue` |
+| 🚫 **HTTP 400 / Bad Payload** | Invalid Request / Schema Mismatch | Mark Non-Retryable & Route Directly to DLQ | `Dead-Letter Queue` |
+| 🔐 **HTTP 401 / 403** | Auth Failure / Invalid Credentials | Trigger Critical Email Alert & Move to DLQ | `DLQ + Critical Alert` |
+| ⚠️ **Unsafe Action** | Mutation / SMS / Payment Trigger | Mark Unsafe (`retry_safe: false`) & Bypass Retry | `Dead-Letter Queue` |
+| 🔁 **Exhausted Attempts** | Retries Exceeded Max Limit (>4) | Update Status to `exhausted` | `Dead-Letter Queue` |
 
 ---
 
@@ -147,11 +148,3 @@ Error Type / Status,Classification,System Action,Target Destination
 ## 📜 License
 
 MIT License — Free to use, modify, and deploy for personal or commercial projects.
-
-
-
-
-
-
-
-
