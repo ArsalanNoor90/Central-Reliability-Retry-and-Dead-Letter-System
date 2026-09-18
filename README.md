@@ -1,14 +1,14 @@
 # 🛡️ Central Reliability, Retry, and Dead-Letter System — n8n Workflow
 
-A production-grade, centralized error handling and resilience engine built for **n8n workflows**. This system serves as a central safety net that captures execution failures across all active automations, normalizes error payloads, suppresses duplicate alert spam, calculates exponential backoff retries, and isolates non-retryable failures into a Dead-Letter Queue for audit.
+A production-grade, centralized error handling and resilience engine built for **n8n workflows**. This system captures execution failures across all active automations, normalizes error payloads, suppresses duplicate alert spam, calculates exponential backoff retries, and isolates non-retryable failures into a Dead-Letter Queue.
 
 ---
 
 ## 🎬 Live Demo & Walkthrough
 
-> 🚀 **[▶️ Watch Full Workflow Execution Demo]([https://www.linkedin.com/in/arsalan-noor](https://www.linkedin.com/posts/arsalan-noor-1510492bb_n8n-automation-workflowautomation-activity-7506757885968887809-Mbjx?utm_source=share&utm_medium=member_desktop&rcm=ACoAAEy28Y0ByakjFKAlhxlwGieeh2Fc8Djsg8s))**  
-> **Platform:** LinkedIn   
-> **What You'll See:** Centralized error receiving ➔ Dynamic fingerprinting & 30-min dedup suppression ➔ Retry safety classification ➔ Replay execution loops ➔ Dead-Letter routing ➔ Real-time Gmail alert dispatch.
+> 🚀 **[▶️ Watch Full Workflow Execution Demo](https://www.linkedin.com/posts/arsalan-noor-1510492bb_n8n-automation-workflowautomation-activity-7506757885968887809-Mbjx?utm_source=share&utm_medium=member_desktop&rcm=ACoAAEy28Y0ByakjFKAlhxlwGieeh2Fc8Djsg8s)**  
+> **Platform:** LinkedIn / Loom Video Walkthrough  
+> **What You'll See:** Real-time error capture ➔ Payload normalization ➔ 30-min dedup window ➔ Safety check evaluation ➔ Retry loop vs DLQ routing ➔ Gmail alert dispatch.
 
 ---
 
@@ -16,25 +16,37 @@ A production-grade, centralized error handling and resilience engine built for *
 
 > 💡 **Workflow Overview**
 > 
-> * **1. Central Error Capture:** Acts as a single entry webhook/trigger for unhandled exceptions across all production workflows.
-> * **2. Payload Normalization:** Standardizes disparate raw error structures into a clean, uniform JSON schema.
-> * **3. Fingerprinting & Dedup Suppression:** Removes dynamic IDs/timestamps to generate a deterministic signature and suppresses duplicate alerts within a 30-minute window.
-> * **4. Intelligent Retry Safety:** Evaluates error category and idempotency flags to prevent accidental double-execution of sensitive mutations (e.g., payments, outbound messaging).
-> * **5. Exponential Backoff Engine:** Schedules retry attempts using an exponential interval formula ($2^{\text{attempt}-1}$) capped at a maximum threshold.
-> * **6. Dead-Letter Queue (DLQ):** Isolates permanent failures (e.g., HTTP 400 bad payloads, auth failures, or exhausted retries) for manual developer review.
-> * **7. Executive Reliability Digest:** Aggregates total failures, auto-recoveries, and unresolved DLQ counts into a daily executive summary report.
+> * **1. Central Error Ingestion:** Receives failures from all production workflows via a unified error trigger.
+> * **2. Payload Normalization:** Standardizes disparate error payloads into a consistent schema (`error_id`, `workflow_name`, `http_status`, `payload_snapshot`).
+> * **3. Fingerprinting & Dedup Suppression:** Regex removes dynamic variables to build a signature and mutes duplicate alerts within 30 minutes.
+> * **4. Intelligent Safety Routing:** Evaluates request context to block automatic retries on sensitive non-idempotent operations (payments, SMS, lead assignments).
+> * **5. Backoff Retry Engine:** Schedules progressive retries using exponential delays ($2^{\text{attempt}-1}$) up to a max threshold.
+> * **6. Dead-Letter Queue (DLQ):** Isolates permanent failures and exhausted retries for developer audit.
+> * **7. Daily Reliability Digest:** Compiles daily aggregate health reports delivered directly via email.
 
 ---
 
-## 🖼️ System Architecture & Workflow Canvas
+## 🖼️ System Screenshots & Architecture
 
-| Central Error Receiver Branch | Retry Worker & DLQ Branch |
+| 01. Complete System Canvas | 02. Error Trigger Configuration |
 | :---: | :---: |
-| ![n8n Error Receiver Canvas](assets/error-receiver-branch.png) | ![Retry Worker Loop](assets/retry-worker-branch.png) |
+| ![Complete Workflow Canvas](./Screenshot%202026-09-18%20213122.png) | ![Error Trigger Node](./Screenshot%202026-09-18%20213144.png) |
 
-| Daily Reliability Digest | Critical Email Alert Preview |
+| 03. Payload Normalization Node | 04. Regex Fingerprint Creation |
 | :---: | :---: |
-| ![Daily Digest Workflow](assets/daily-digest-branch.png) | ![Gmail Alert Preview](assets/gmail-alert-preview.png) |
+| ![Normalize Payload](./Screenshot%202026-09-18%20213217.png) | ![Create Fingerprint](./Screenshot%202026-09-18%20213300.png) |
+
+| 05. Retry Safety Evaluation | 06. 30-Min Dedup Window Check |
+| :---: | :---: |
+| ![Determine Safety](./Screenshot%202026-09-18%20213327.png) | ![Dedup Check](./Screenshot%202026-09-18%20213417.png) |
+
+| 07. Google Sheets Audit Logging | 08. Gmail Alert Template |
+| :---: | :---: |
+| ![Google Sheets Logging](./Screenshot%202026-09-18%20213436.png) | ![Gmail Alert Preview](./Screenshot%202026-09-18%20213502.png) |
+
+| 09. Exponential Backoff Calc | 10. Dead-Letter Queue Logging |
+| :---: | :---: |
+| ![Exponential Backoff](./Screenshot%202026-09-18%20213539.png) | ![Dead-Letter Queue](./Screenshot%202026-09-18%20213618.png) |
 
 ---
 
@@ -42,10 +54,10 @@ A production-grade, centralized error handling and resilience engine built for *
 
 | Feature | Description |
 | :--- | :--- |
-| 🧹 **Payload Normalization** | Converts raw n8n execution errors into a standardized schema (`error_id`, `workflow_name`, `http_status`, `payload_snapshot`). |
+| 🧹 **Payload Normalization** | Converts raw n8n execution errors into a standardized schema across all workflows. |
 | 🔑 **Regex Fingerprinting** | Strips timestamps, alphanumeric IDs, and numbers to group identical recurring error signatures. |
 | 🔕 **30-Min Dedup Window** | Prevents inbox flooding by muting duplicate notifications for repeated error signatures within 30 minutes. |
-| 🛑 **Idempotency Safeguard** | Blocks automatic retries on non-idempotent operations (e.g., payments, SMS, lead assignment) to protect data integrity. |
+| 🛑 **Idempotency Safeguard** | Blocks automatic retries on non-idempotent operations (payments, SMS, lead assignment) to protect data integrity. |
 | 📈 **Exponential Backoff** | Dynamically calculates progressive delay intervals ($2^{\text{attempt}-1}$) capped at a maximum of 4 retry attempts. |
 | 📦 **Dead-Letter Isolation** | Automatically routes non-retryable errors (e.g., HTTP 400, 401, 403) and exhausted retries to the DLQ tab. |
 | 📊 **Daily Health Digest** | Compiles daily metrics (Total Errors, Recovered Runs, DLQ Counts) and dispatches an HTML summary digest. |
@@ -72,26 +84,3 @@ A production-grade, centralized error handling and resilience engine built for *
   "status": "queued",
   "created_at": "2026-09-18T13:58:38.996Z"
 }
-
-🚨 Error Routing & Handling Rules
-Error Type / StatusClassificationSystem ActionTarget Destination🔄 HTTP 429 / 5xxRate Limits / Server ErrorsAuto-Calculate Backoff & Queue for RetryRetry Queue🚫 HTTP 400 / Bad PayloadInvalid Request / Schema MismatchMark Non-Retryable & Route Directly to DLQDead-Letter Queue🔐 HTTP 401 / 403Auth Failure / Invalid CredentialsTrigger Critical Email Alert & Move to DLQDLQ + Critical Alert⚠️ Unsafe ActionMutation / SMS / Payment TriggerMark Unsafe (retry_safe: false) & Bypass RetryDead-Letter Queue🔁 Exhausted AttemptsRetries Exceeded Max Limit (>4)Update Status to exhaustedDead-Letter Queue
-
-
-🔄 Execution Workflow Pipeline
-StepPhaseAction / Node ExecutedDescription01IngestionError TriggerListens for workflow failures across connected n8n pipelines.   02NormalizationNormalize Error PayloadExtracts error details and builds a standardized JSON schema.   03FingerprintingCreate Error FingerprintRuns regex filters to produce a unique signature (error_fingerprint).   04Safety CheckDetermine Retry SafetyValidates if the operation is safe to replay without side effects.   05Dedup CheckCheck 30-Minute WindowQueries historical logs to suppress duplicate alerts within 30 minutes.   06RoutingRetry Safe?Routes safe transient errors to Retry Queue and permanent failures to DLQ.   07Replay LoopRetry WorkerCron-triggered worker pulls due retries (next_retry_at <= NOW()) and executes sub-workflow.08ReportingDaily Reliability DigestRuns daily to summarize system health, recovery rates, and DLQ metrics via Gmail.
-
-
-🛠️ Tech Stack & Integration Ecosystem
-Tool / TechnologyRole in Workflow⚡ n8nOrchestration engine, sub-workflow executions, error capturing, and conditional routing📊 Google Sheets APISystem state logging, active retry queue management, and Dead-Letter database persistence   📧 Gmail APIReal-time critical error notifications and daily executive digest delivery   📜 JavaScript (ES6+)Regex normalization, dynamic fingerprinting, backoff calculation, and payload parsing
-
-💡 Practical Use Cases
-Business ScenarioProblem SolvedOperational ImpactNotification Spam SuppressionHundreds of identical emails during API downtimeMutes duplicate alerts for 30 minutes while capturing all errors in logsTransient API RecoveryTemporary 503 service outages breaking integrationsAuto-recovers failed runs via exponential backoff retries without human interventionSafe Payment & SMS HandlingRisk of double-charging customers or re-sending SMS on retryIntelligently isolates unsafe mutations directly to DLQ for manual audit
-
-🚀 Setup & Execution Guide
-StepTaskDetails01Import WorkflowOpen n8n ➔ Click Import from file ➔ Select workflows/central-reliability-system.json.02Configure CredentialsConnect Google Sheets API and Gmail OAuth2 / SMTP credentials.03Setup Google SheetCreate target Google Sheet with tabs: ErrorLog, RetryQueue, DeadLetterQueue, and DailyDigest.04Attach Error TriggerConfigure your primary automations' Error Workflow setting to point to this central workflow.05Activate SystemToggle workflow status to Active to begin automated error tracking and retries.
-
-📜 License
-MIT License — Free to use, modify, and deploy for personal or commercial projects.
-
-
-
