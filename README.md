@@ -85,224 +85,69 @@ A production-grade, centralized error handling and resilience engine built for *
   "created_at": "2026-09-18T13:58:38.996Z"
 }
 
-<h2>🚨 Error Routing & Handling Rules</h2>
+## 🚨 Error Routing & Handling Rules
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="left">Error Type / Status</th>
-      <th align="left">Classification</th>
-      <th align="left">System Action</th>
-      <th align="left">Target Destination</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>🔄 <b>HTTP 429 / 5xx</b></td>
-      <td>Rate Limits / Server Errors</td>
-      <td>Auto-Calculate Backoff & Queue for Retry</td>
-      <td><code>Retry Queue</code></td>
-    </tr>
-    <tr>
-      <td>🚫 <b>HTTP 400 / Bad Payload</b></td>
-      <td>Invalid Request / Schema Mismatch</td>
-      <td>Mark Non-Retryable & Route Directly to DLQ</td>
-      <td><code>Dead-Letter Queue</code></td>
-    </tr>
-    <tr>
-      <td>🔐 <b>HTTP 401 / 403</b></td>
-      <td>Auth Failure / Invalid Credentials</td>
-      <td>Trigger Critical Email Alert & Move to DLQ</td>
-      <td><code>DLQ + Critical Alert</code></td>
-    </tr>
-    <tr>
-      <td>⚠️ <b>Unsafe Action</b></td>
-      <td>Mutation / SMS / Payment Trigger</td>
-      <td>Mark Unsafe (<code>retry_safe: false</code>) & Bypass Retry</td>
-      <td><code>Dead-Letter Queue</code></td>
-    </tr>
-    <tr>
-      <td>🔁 <b>Exhausted Attempts</b></td>
-      <td>Retries Exceeded Max Limit (&gt;4)</td>
-      <td>Update Status to <code>exhausted</code></td>
-      <td><code>Dead-Letter Queue</code></td>
-    </tr>
-  </tbody>
-</table>
+| Error Type / Status | Classification | System Action | Target Destination |
+| :--- | :--- | :--- | :--- |
+| 🔄 **HTTP 429 / 5xx** | Rate Limits / Server Errors | Auto-Calculate Backoff & Queue for Retry | `Retry Queue` |
+| 🚫 **HTTP 400 / Bad Payload** | Invalid Request / Schema Mismatch | Mark Non-Retryable & Route Directly to DLQ | `Dead-Letter Queue` |
+| 🔐 **HTTP 401 / 403** | Auth Failure / Invalid Credentials | Trigger Critical Email Alert & Move to DLQ | `DLQ + Critical Alert` |
+| ⚠️ **Unsafe Action** | Mutation / SMS / Payment Trigger | Mark Unsafe (`retry_safe: false`) & Bypass Retry | `Dead-Letter Queue` |
+| 🔁 **Exhausted Attempts** | Retries Exceeded Max Limit (>4) | Update Status to `exhausted` | `Dead-Letter Queue` |
 
-<br/>
+---
 
-<h2>🔄 Execution Workflow Pipeline</h2>
+## 🔄 Execution Workflow Pipeline
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="center">Step</th>
-      <th align="left">Phase</th>
-      <th align="left">Action / Node Executed</th>
-      <th align="left">Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center"><b>01</b></td>
-      <td><b>Ingestion</b></td>
-      <td><code>Error Trigger</code></td>
-      <td>Listens for workflow failures across connected n8n pipelines.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>02</b></td>
-      <td><b>Normalization</b></td>
-      <td><code>Normalize Error Payload</code></td>
-      <td>Extracts error details and builds a standardized JSON schema.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>03</b></td>
-      <td><b>Fingerprinting</b></td>
-      <td><code>Create Error Fingerprint</code></td>
-      <td>Runs regex filters to produce a unique signature (<code>error_fingerprint</code>).</td>
-    </tr>
-    <tr>
-      <td align="center"><b>04</b></td>
-      <td><b>Safety Check</b></td>
-      <td><code>Determine Retry Safety</code></td>
-      <td>Validates if the operation is safe to replay without side effects.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>05</b></td>
-      <td><b>Dedup Check</b></td>
-      <td><code>Check 30-Minute Window</code></td>
-      <td>Queries historical logs to suppress duplicate alerts within 30 minutes.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>06</b></td>
-      <td><b>Routing</b></td>
-      <td><code>Retry Safe?</code></td>
-      <td>Routes safe transient errors to Retry Queue and permanent failures to DLQ.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>07</b></td>
-      <td><b>Replay Loop</b></td>
-      <td><code>Retry Worker</code></td>
-      <td>Cron-triggered worker pulls due retries (<code>next_retry_at &lt;= NOW()</code>) and executes sub-workflow.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>08</b></td>
-      <td><b>Reporting</b></td>
-      <td><code>Daily Reliability Digest</code></td>
-      <td>Runs daily to summarize system health, recovery rates, and DLQ metrics via Gmail.</td>
-    </tr>
-  </tbody>
-</table>
+| Step | Phase | Action / Node Executed | Description |
+| :---: | :--- | :--- | :--- |
+| **01** | **Ingestion** | `Error Trigger` | Listens for workflow failures across connected n8n pipelines. |
+| **02** | **Normalization** | `Normalize Error Payload` | Extracts error details and builds a standardized JSON schema. |
+| **03** | **Fingerprinting** | `Create Error Fingerprint` | Runs regex filters to produce a unique signature (`error_fingerprint`). |
+| **04** | **Safety Check** | `Determine Retry Safety` | Validates if the operation is safe to replay without side effects. |
+| **05** | **Dedup Check** | `Check 30-Minute Window` | Queries historical logs to suppress duplicate alerts within 30 minutes. |
+| **06** | **Routing** | `Retry Safe?` | Routes safe transient errors to Retry Queue and permanent failures to DLQ. |
+| **07** | **Replay Loop** | `Retry Worker` | Cron-triggered worker pulls due retries (`next_retry_at <= NOW()`) and executes sub-workflow. |
+| **08** | **Reporting** | `Daily Reliability Digest` | Runs daily to summarize system health, recovery rates, and DLQ metrics via Gmail. |
 
-<br/>
+---
 
-<h2>🛠️ Tech Stack & Integration Ecosystem</h2>
+## 🛠️ Tech Stack & Integration Ecosystem
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="left" width="30%">Tool / Technology</th>
-      <th align="left" width="70%">Role in Workflow</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>⚡ <b>n8n</b></td>
-      <td>Orchestration engine, sub-workflow executions, error capturing, and conditional routing</td>
-    </tr>
-    <tr>
-      <td>📊 <b>Google Sheets API</b></td>
-      <td>System state logging, active retry queue management, and Dead-Letter database persistence</td>
-    </tr>
-    <tr>
-      <td>📧 <b>Gmail API</b></td>
-      <td>Real-time critical error notifications and daily executive digest delivery</td>
-    </tr>
-    <tr>
-      <td>📜 <b>JavaScript (ES6+)</b></td>
-      <td>Regex normalization, dynamic fingerprinting, backoff calculation, and payload parsing</td>
-    </tr>
-  </tbody>
-</table>
+| Tool / Technology | Role in Workflow |
+| :--- | :--- |
+| ⚡ **n8n** | Orchestration engine, sub-workflow executions, error capturing, and conditional routing |
+| 📊 **Google Sheets API** | System state logging, active retry queue management, and Dead-Letter database persistence |
+| 📧 **Gmail API** | Real-time critical error notifications and daily executive digest delivery |
+| 📜 **JavaScript (ES6+)** | Regex normalization, dynamic fingerprinting, backoff calculation, and payload parsing |
 
-<br/>
+---
 
-<h2>💡 Practical Use Cases</h2>
+## 💡 Practical Use Cases
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="left">Business Scenario</th>
-      <th align="left">Problem Solved</th>
-      <th align="left">Operational Impact</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><b>Notification Spam Suppression</b></td>
-      <td>Hundreds of identical emails during API downtime</td>
-      <td>Mutes duplicate alerts for 30 minutes while capturing all errors in logs</td>
-    </tr>
-    <tr>
-      <td><b>Transient API Recovery</b></td>
-      <td>Temporary 503 service outages breaking integrations</td>
-      <td>Auto-recovers failed runs via exponential backoff retries without human intervention</td>
-    </tr>
-    <tr>
-      <td><b>Safe Payment & SMS Handling</b></td>
-      <td>Risk of double-charging customers or re-sending SMS on retry</td>
-      <td>Intelligently isolates unsafe mutations directly to DLQ for manual audit</td>
-    </tr>
-  </tbody>
-</table>
+| Business Scenario | Problem Solved | Operational Impact |
+| :--- | :--- | :--- |
+| **Notification Spam Suppression** | Hundreds of identical emails during API downtime | Mutes duplicate alerts for 30 minutes while capturing all errors in logs |
+| **Transient API Recovery** | Temporary 503 service outages breaking integrations | Auto-recovers failed runs via exponential backoff retries without human intervention |
+| **Safe Payment & SMS Handling** | Risk of double-charging customers or re-sending SMS on retry | Intelligently isolates unsafe mutations directly to DLQ for manual audit |
 
-<br/>
+---
 
-<h2>🚀 Setup & Execution Guide</h2>
+## 🚀 Setup & Execution Guide
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="center">Step</th>
-      <th align="left">Task</th>
-      <th align="left">Details</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center"><b>01</b></td>
-      <td><b>Import Workflow</b></td>
-      <td>Open n8n ➔ Click <b>Import from file</b> ➔ Select <code>workflows/central-reliability-system.json</code>.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>02</b></td>
-      <td><b>Configure Credentials</b></td>
-      <td>Connect <b>Google Sheets API</b> and <b>Gmail OAuth2 / SMTP</b> credentials.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>03</b></td>
-      <td><b>Setup Google Sheet</b></td>
-      <td>Create target Google Sheet with tabs: <code>ErrorLog</code>, <code>RetryQueue</code>, <code>DeadLetterQueue</code>, and <code>DailyDigest</code>.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>04</b></td>
-      <td><b>Attach Error Trigger</b></td>
-      <td>Configure your primary automations' Error Workflow setting to point to this central workflow.</td>
-    </tr>
-    <tr>
-      <td align="center"><b>05</b></td>
-      <td><b>Activate System</b></td>
-      <td>Toggle workflow status to <b>Active</b> to begin automated error tracking and retries.</td>
-    </tr>
-  </tbody>
-</table>
+| Step | Task | Details |
+| :---: | :--- | :--- |
+| **01** | **Import Workflow** | Open n8n ➔ Click **Import from file** ➔ Select `workflows/central-reliability-system.json`. |
+| **02** | **Configure Credentials** | Connect **Google Sheets API** and **Gmail OAuth2 / SMTP** credentials. |
+| **03** | **Setup Google Sheet** | Create target Google Sheet with tabs: `ErrorLog`, `RetryQueue`, `DeadLetterQueue`, and `DailyDigest`. |
+| **04** | **Attach Error Trigger** | Configure your primary automations' Error Workflow setting to point to this central workflow. |
+| **05** | **Activate System** | Toggle workflow status to **Active** to begin automated error tracking and retries. |
 
-<br/>
+---
 
-<h2>📜 License</h2>
+## 📜 License
 
-<p>MIT License — Free to use, modify, and deploy for personal or commercial projects.</p>
+MIT License — Free to use, modify, and deploy for personal or commercial projects.
 
 
 
