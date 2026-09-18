@@ -1,0 +1,2396 @@
+{
+  "name": "Central Reliability, Retry, and Dead-Letter System  (5)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -544,
+        -528
+      ],
+      "id": "a543a6d1-7084-4522-b1c4-6c242d80e280",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $json;\nconst workflowName = e.workflow?.name ?? e.execution?.workflowName ?? '';\nconst workflowExecutionId = e.workflow?.id ?? '';\nconst sourceExecutionId = e.execution?.id ?? e.executionId ?? '';\nconst failedNode = e.execution?.lastNodeExecuted ?? e.lastNodeExecuted ?? '';\nconst httpStatus = e.httpCode ?? e.statusCode ?? e.response?.status ?? 0;\nconst errorMessage = e.message ?? e.error?.message ?? e.execution?.error?.message ?? 'Unknown error';\n\nreturn {\n  json: {\n    error_id: `err_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,\n    workflow_name: workflowName,\n    workflow_execution_id: workflowExecutionId,\n    source_execution_id: sourceExecutionId,\n    failed_node: failedNode,\n    http_status: httpStatus,\n    error_class: '',\n    error_message: errorMessage,\n    operation_type: '',\n    idempotency_key: '',\n    retryable: false,\n    attempt_number: 0,\n    next_retry_at: '',\n    payload_snapshot: e,\n    status: 'queued',\n    created_at: new Date().toISOString()\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -528
+      ],
+      "id": "c5a97243-2130-431a-9d24-5339c879baa9",
+      "name": "Normalize Error Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\n// Normalize error message: remove IDs, numbers, timestamps for stable fingerprinting\nfunction normalizeMessage(msg) {\n  if (!msg) return '';\n  return msg\n    .replace(/[0-9a-fA-F]{8,}/g, 'ID')        // long hex/alphanumeric IDs\n    .replace(/\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z?/g, 'TIMESTAMP') // ISO timestamps\n    .replace(/\\d+/g, 'N')                      // any remaining numbers\n    .trim()\n    .toLowerCase();\n}\n\nconst normalizedMessage = normalizeMessage(data.error_message);\n\nconst fingerprintSource = [\n  data.workflow_name || '',\n  data.failed_node || '',\n  data.http_status || '',\n  normalizedMessage\n].join('|');\n\n// Simple deterministic hash — no external module required\nlet hash = 0;\nfor (let i = 0; i < fingerprintSource.length; i++) {\n  hash = ((hash << 5) - hash) + fingerprintSource.charCodeAt(i);\n  hash |= 0;\n}\nconst error_fingerprint = `ERR-${Math.abs(hash)}`;\n\nreturn {\n  json: {\n    ...data,\n    error_fingerprint\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        -528
+      ],
+      "id": "996d3ae9-b056-4362-8024-cff110b7550a",
+      "name": "Create Error Fingerprint"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\nconst status = Number(data.http_status || 0);\nconst errorMsg = (data.error_message || '').toLowerCase();\n\nlet error_category = 'unknown';\nlet severity = 'medium';\nlet retryable = false;\nlet retry_reason = '';\n\n// Network timeout detection (no HTTP status, but timeout-related message)\nconst isNetworkTimeout = status === 0 && /timeout|econnrefused|network|etimedout/.test(errorMsg);\n// Duplicate/conflict detection\nconst isDuplicateConflict = /duplicate|conflict|already exists/.test(errorMsg);\n\nif (status === 429) {\n  error_category = 'rate_limit';\n  severity = 'high';\n  retryable = true;\n  retry_reason = 'Rate limit exceeded';\n}\nelse if ([500, 502, 503, 504].includes(status)) {\n  error_category = 'server_error';\n  severity = 'high';\n  retryable = true;\n  retry_reason = 'Temporary server-side failure';\n}\nelse if (isNetworkTimeout) {\n  error_category = 'network_timeout';\n  severity = 'high';\n  retryable = true;\n  retry_reason = 'Network timeout - retryable only if operation is idempotent';\n}\nelse if (isDuplicateConflict) {\n  error_category = 'duplicate_conflict';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Duplicate/conflict detected - search existing record instead of recreating';\n}\nelse if (status === 400) {\n  error_category = 'bad_request';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Invalid request; manual correction may be required';\n}\nelse if (status === 401 || status === 403) {\n  error_category = 'authentication_or_permission';\n  severity = 'critical';\n  retryable = false;\n  retry_reason = 'Authentication or permission problem';\n}\nelse if (status === 404) {\n  error_category = 'not_found';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Requested resource was not found';\n}\nelse if (status >= 400 && status < 500) {\n  error_category = 'client_error';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Client-side request error';\n}\nelse if (/schema|validation|parse|unexpected token/.test(errorMsg)) {\n  error_category = 'code_or_schema_failure';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Code or schema failure - not safe to retry';\n}\nelse {\n  error_category = 'workflow_error';\n  severity = 'medium';\n  retryable = false;\n  retry_reason = 'Unknown or non-HTTP workflow error';\n}\n\nreturn {\n  json: {\n    ...data,\n    error_category,\n    severity,\n    retryable,\n    retry_reason\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        -528
+      ],
+      "id": "a3b6195a-afdd-46d4-b09a-e509fcc7bde1",
+      "name": "Classify Error"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\nconst retryableByStatus = Boolean(data.retryable);\n\nconst operation = String(data.operation_type || '').toLowerCase();\n\nconst idempotencyKey = String(data.idempotency_key || '').trim();\n\nconst safeOperations = [\n  'update',\n  'upsert',\n  'search',\n  'read',\n  'get',\n  'lookup'\n];\n\nconst operationIsSafe = safeOperations.some(op =>\n  operation.includes(op)\n);\n\nconst protectedOperation =\n  operation.includes('create') ||\n  operation.includes('send') ||\n  operation.includes('assign') ||\n  operation.includes('payment');\n\nconst hasIdempotencyProtection = Boolean(idempotencyKey);\n\nlet retry_safe = false;\nlet retry_safety_reason = '';\n\nif (!retryableByStatus) {\n  retry_safe = false;\n  retry_safety_reason = 'Error classification does not allow automatic retry';\n}\nelse if (operationIsSafe) {\n  retry_safe = true;\n  retry_safety_reason = 'Operation is read/update/upsert style and is safe to retry';\n}\nelse if (protectedOperation && hasIdempotencyProtection) {\n  retry_safe = true;\n  retry_safety_reason = 'Operation has idempotency protection';\n}\nelse if (protectedOperation && !hasIdempotencyProtection) {\n  retry_safe = false;\n  retry_safety_reason = 'Potentially duplicate side effect without idempotency protection';\n}\nelse {\n  retry_safe = false;\n  retry_safety_reason = 'Operation safety could not be established';\n}\n\nreturn {\n  json: {\n    ...data,\n    retry_safe,\n    retry_safety_reason\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        -528
+      ],
+      "id": "c72571b1-c49a-43a8-baf0-9e708ec9834e",
+      "name": "Determine Retry Safety"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44",
+          "mode": "list",
+          "cachedResultName": "Error Alerts",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "error_fingerprint",
+              "lookupValue": "={{ $json.error_fingerprint }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        368,
+        -528
+      ],
+      "id": "e4d38b11-a0f0-4df5-b954-fb8c48b28317",
+      "name": "Duplicate Alert Check",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6b3eb5bf-1503-4f62-ad24-17326c435527",
+              "leftValue": "={{ $json.suppress_alert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        736,
+        -528
+      ],
+      "id": "4c29b2b1-4fd0-4edb-9243-c6a1270956be",
+      "name": "Duplicate Alert?"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44",
+          "mode": "list",
+          "cachedResultName": "Error Alerts",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_fingerprint": "={{ $json.error_fingerprint }}",
+            "last_seen": "={{ $now }}",
+            "alert_count": "={{ $json.existing_alert_count + 1 }}"
+          },
+          "matchingColumns": [
+            "error_fingerprint"
+          ],
+          "schema": [
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "last_seen",
+              "displayName": "last_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "alert_count",
+              "displayName": "alert_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_alerted_at",
+              "displayName": "last_alerted_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        976,
+        -640
+      ],
+      "id": "12661fee-2a31-43b7-afb8-027dffda225d",
+      "name": "Update Error Alert",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Determine Retry Safety').first().json;\nreturn {\n  json: {\n    ...data,\n    alert_status: 'new_alert',\n    first_seen: new Date().toISOString(),\n    last_seen: new Date().toISOString(),\n    alert_count: 1,\n    alerted: false\n    // status field yahan touch nahi kiya — 'queued' hi rahega jo pehle set hua tha\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        -448
+      ],
+      "id": "bd0ef654-89c5-4f75-ae0f-a420ea585a09",
+      "name": "Prepare New Error"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44",
+          "mode": "list",
+          "cachedResultName": "Error Alerts",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19V-kn-HSHwsYFEyneWIi06j48q6mt9O_RKND_XXnE44/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_fingerprint": "={{ $json.error_fingerprint }}",
+            "first_seen": "={{ $json.first_seen }}",
+            "last_seen": "={{ $json.last_seen }}",
+            "alert_count": "={{ $json.alert_count }}",
+            "created_at": "={{ $json.first_seen }}",
+            "last_alerted_at": "={{ $now }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_seen",
+              "displayName": "last_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "alert_count",
+              "displayName": "alert_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "last_alerted_at",
+              "displayName": "last_alerted_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1200,
+        -608
+      ],
+      "id": "280a1332-bdb1-4732-9577-ccd630864113",
+      "name": "Create Error Alert",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b48828c5-3ba7-4bde-8568-5efcd86eac0b",
+              "leftValue": "={{ $json.retry_safe }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1424,
+        -448
+      ],
+      "id": "ce939c5b-5d35-404b-9d56-3c8056f5dac6",
+      "name": "Retry Safe?"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8",
+          "mode": "list",
+          "cachedResultName": "Retry Queue",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_id": "={{ $json.error_id }}",
+            "error_fingerprint": "={{ $json.error_fingerprint }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "failed_node": "={{ $json.failed_node }}",
+            "attempt_number": "={{ Number($json.attempt_number || 0) }}",
+            "next_retry_at": "={{ $json.next_retry_at || new Date(Date.now() + 5 * 60 * 1000).toISOString() }}",
+            "created_at": "={{ $json.created_at || new Date().toISOString() }}",
+            "workflow_execution_id": "={{ $json.workflow_execution_id }}",
+            "operation_type": "={{ $json.operation_type }}",
+            "idempotency_key": "={{ $json.idempotency_key }}",
+            "payload_snapshot": "={{ JSON.stringify($json.payload_snapshot) }}",
+            "status": "retrying"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_execution_id",
+              "displayName": "workflow_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operation_type",
+              "displayName": "operation_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "next_retry_at",
+              "displayName": "next_retry_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "idempotency_key",
+              "displayName": "idempotency_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1856,
+        -544
+      ],
+      "id": "1cf7097f-5836-41e7-9f1f-fbf72f1434a2",
+      "name": "Retry Queue",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -544,
+        32
+      ],
+      "id": "909dfcfd-d300-4e7b-a81b-25a339880e17",
+      "name": "Retry Worker"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8",
+          "mode": "list",
+          "cachedResultName": "Retry Queue",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "status",
+              "lookupValue": "retrying"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -320,
+        32
+      ],
+      "id": "f1465cd1-5b03-49ea-9aa6-771cffa96f89",
+      "name": "Get Retry Queue",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = Date.now();\n\nreturn $input.all().filter(item => {\n  const nextRetryAt = item.json.next_retry_at;\n\n  if (!nextRetryAt) {\n    return false;\n  }\n\n  const retryTime = new Date(nextRetryAt).getTime();\n\n  return !Number.isNaN(retryTime) && retryTime <= now;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        32
+      ],
+      "id": "c56b0404-e632-4c83-9d6f-75ca6845d28c",
+      "name": "Filter Due Retries",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8",
+          "mode": "list",
+          "cachedResultName": "Retry Queue",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_id": "={{ $json.error_id }}",
+            "status": "claimed"
+          },
+          "matchingColumns": [
+            "error_id"
+          ],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_execution_id",
+              "displayName": "workflow_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operation_type",
+              "displayName": "operation_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "next_retry_at",
+              "displayName": "next_retry_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "idempotency_key",
+              "displayName": "idempotency_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "resolved_at",
+              "displayName": "resolved_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        128,
+        32
+      ],
+      "id": "3c009e76-9476-4735-bb20-caad78ad3bbb",
+      "name": "Claim Retry Record",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss",
+          "mode": "list",
+          "cachedResultName": "Error Log",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "error_id",
+              "lookupValue": "={{ $json.error_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        352,
+        32
+      ],
+      "id": "95e7d248-7415-4517-8fc7-eb101b56f12f",
+      "name": "Load Error Log Record",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss",
+          "mode": "list",
+          "cachedResultName": "Error Log",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_id": "={{ $json.error_id }}",
+            "error_fingerprint": "={{ $json.error_fingerprint }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "source_execution_id": "={{ $json.source_execution_id }}",
+            "failed_node": "={{ $json.failed_node }}",
+            "http_status": "={{ $json.http_status }}",
+            "error_class": "={{ $json.error_class }}",
+            "error_message": "={{ $json.error_message }}",
+            "operation_type": "={{ $json.operation_type }}",
+            "idempotency_key": "={{ $json.idempotency_key }}",
+            "retryable": "={{ $json.retryable }}",
+            "attempt_number": "={{ $json.attempt_number }}",
+            "next_retry_at": "={{ $json.next_retry_at }}",
+            "payload_snapshot": "={{ JSON.stringify($json.payload_snapshot) }}",
+            "status": "={{ $json.status }}",
+            "error_category": "={{ $json.error_category }}",
+            "severity": "={{ $json.severity }}",
+            "retry_reason": "={{ $json.retry_reason }}",
+            "retry_safe": "={{ $json.retry_safe }}",
+            "retry_safety_reason": "={{ $json.retry_safety_reason }}",
+            "created_at": "={{ $json.created_at }}",
+            "first_seen": "={{ $json.first_seen }}",
+            "workflow_execution_id": "={{ $json.workflow_execution_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source_execution_id",
+              "displayName": "source_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "http_status",
+              "displayName": "http_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_class",
+              "displayName": "error_class",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_message",
+              "displayName": "error_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operation_type",
+              "displayName": "operation_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "idempotency_key",
+              "displayName": "idempotency_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "retryable",
+              "displayName": "retryable",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "next_retry_at",
+              "displayName": "next_retry_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_category",
+              "displayName": "error_category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "retry_reason",
+              "displayName": "retry_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "retry_safe",
+              "displayName": "retry_safe",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "retry_safety_reason",
+              "displayName": "retry_safety_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_execution_id",
+              "displayName": "workflow_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1200,
+        -320
+      ],
+      "id": "ae7eb406-da80-4c6c-8a49-b00eb5e88a1f",
+      "name": "Save Error Log",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst workflowName = data.workflow_name || '';\n\nconst workflowMap = {\n  'AI voice HVAC Call Intelligence pipline (1)': '2TyMSPVjxctntJsm',\n  'Technician Dispatch Matching Engine': '4GJTeyPzuWFNVUyc'\n};\n\nconst targetWorkflowId = workflowMap[workflowName] || null;\nconst canReplay = Boolean(targetWorkflowId);\n\nreturn {\n  json: {\n    ...data,\n    target_workflow_id: targetWorkflowId,\n    can_replay: canReplay,\n    replay_reason: canReplay\n      ? `Mapped to workflow: ${workflowName}`\n      : `No matching workflow found for: ${workflowName}`\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        32
+      ],
+      "id": "139c7162-6daf-4796-9028-792c32d6cb3a",
+      "name": "Determine Replay Workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "const matches = $input.all();\nconst currentData = $('Determine Retry Safety').first().json;\n\nif (matches.length === 0 || Object.keys(matches[0].json).length === 0) {\n  // Koi purana match nahi mila — naya alert bhejo\n  return [{\n    json: {\n      ...currentData,\n      is_duplicate: false,\n      suppress_alert: false\n    }\n  }];\n}\n\nconst lastAlert = matches[0].json;\nconst lastAlertTime = new Date(lastAlert.last_alerted_at);\nconst now = new Date();\nconst diffMinutes = (now - lastAlertTime) / (1000 * 60);\n\nconst withinWindow = !isNaN(diffMinutes) && diffMinutes < 30;\n\nreturn [{\n  json: {\n    ...currentData,\n    is_duplicate: withinWindow,\n    suppress_alert: withinWindow,\n    minutes_since_last_alert: isNaN(diffMinutes) ? null : Math.round(diffMinutes),\n    existing_alert_count: lastAlert.alert_count || 0\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        -528
+      ],
+      "id": "a936f0dd-cc88-4f69-b34d-cda6080c7a5d",
+      "name": "Check 30-Minute Window"
+    },
+    {
+      "parameters": {
+        "sendTo": "kzarsalan3@gmail.com",
+        "subject": "=🚨 Error Alert - {{ $('Determine Retry Safety').item.json.workflow_name }} - {{ $('Determine Retry Safety').item.json.error_category }}",
+        "message": "=<h3>🚨 Error Alert</h3>\n<p><strong>Workflow:</strong> {{ $('Determine Retry Safety').item.json.workflow_name }}</p>\n<p><strong>Failed Node:</strong> {{ $('Determine Retry Safety').item.json.failed_node }}</p>\n<p><strong>Error Category:</strong> {{ $('Determine Retry Safety').item.json.error_category }}</p>\n<p><strong>Severity:</strong> {{ $('Determine Retry Safety').item.json.severity }}</p>\n<p><strong>Error Message:</strong> {{ $('Determine Retry Safety').item.json.error_message }}</p>\n<p><strong>Retry Safe:</strong> {{ $('Determine Retry Safety').item.json.retry_safe }}</p>\n<p><strong>Fingerprint:</strong> {{ $json.error_fingerprint }}</p>\n<p><strong>Occurred At:</strong> {{ $json.created_at }}</p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1424,
+        -608
+      ],
+      "id": "aedda0d5-452e-459c-9037-92e3bded66f3",
+      "name": "Send Critical Alert Email",
+      "webhookId": "6c006b34-931d-4de6-ae21-5827e2f9eeed",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "EusB1TZilQXg3t9b",
+          "name": "Gmail account 23"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk",
+          "mode": "list",
+          "cachedResultName": "Dead Letter",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "error_id": "={{ $json.error_id }}",
+            "error_fingerprint": "={{ $json.error_fingerprint }}",
+            "workflow_name": "={{ $json.workflow_name }}",
+            "failed_node": "={{ $json.failed_node }}",
+            "error_category": "={{ $json.error_category }}",
+            "severity": "={{ $json.severity }}",
+            "error_message": "={{ $json.error_message }}",
+            "attempt_number": "={{ $json.attempt_number }}",
+            "created_at": "={{ $json.created_at }}",
+            "status": "dead_letter",
+            "payload_snapshot": "={{ JSON.stringify($json.payload_snapshot) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_category",
+              "displayName": "error_category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_message",
+              "displayName": "error_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1664,
+        -336
+      ],
+      "id": "bba3a92b-a40a-442d-a544-b4d09c4a8b4d",
+      "name": "Dead-Letter Queue",
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\nconst attempt = Number(data.attempt_number || 0) + 1;\nconst baseMinutes = 2;\nconst delayMinutes = Math.min(baseMinutes * Math.pow(2, attempt - 1), 60);\nconst nextRetryAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString();\n\nreturn {\n  json: {\n    ...data,\n    attempt_number: attempt,\n    next_retry_at: nextRetryAt,\n    delay_minutes: delayMinutes\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        -544
+      ],
+      "id": "656a3004-3e03-40da-8413-258c59b726a6",
+      "name": "Calculate Exponential Backoff"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.target_workflow_id }}",
+          "cachedResultName": "={{ $json.target_workflow_id }}"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        768,
+        32
+      ],
+      "id": "0e783d32-9632-4844-b105-d457e2b90c0c",
+      "name": "Execute Replay Workflow",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8",
+          "mode": "list",
+          "cachedResultName": "Retry Queue",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/16mDb4oMSf85q8hTonL7ryChYNmVEzTno24uxQZd-ZB8/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "resolved",
+            "resolved_at": "={{ $now }}"
+          },
+          "matchingColumns": [
+            "error_id"
+          ],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "workflow_execution_id",
+              "displayName": "workflow_execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "operation_type",
+              "displayName": "operation_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "next_retry_at",
+              "displayName": "next_retry_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "idempotency_key",
+              "displayName": "idempotency_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "resolved_at",
+              "displayName": "resolved_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1024,
+        -96
+      ],
+      "id": "33f89101-40cd-40e9-b735-80990dac79c2",
+      "name": "Mark as Resolved",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "82e77312-1f59-442b-85aa-a716be20cced",
+              "leftValue": "={{ $('Load Error Log Record').item.json.attempt_number }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1024,
+        128
+      ],
+      "id": "d0acd8b1-d761-4adf-a173-ba4044e01e36",
+      "name": "Check Attempt Limit"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk",
+          "mode": "list",
+          "cachedResultName": "Dead Letter",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IJ9MhL7cy7ocVsg3jzxB6dXqHOpxuGtfaiO7Gn6FANk/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "exhausted_retries"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "error_id",
+              "displayName": "error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error_fingerprint",
+              "displayName": "error_fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "failed_node",
+              "displayName": "failed_node",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error_category",
+              "displayName": "error_category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error_message",
+              "displayName": "error_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attempt_number",
+              "displayName": "attempt_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payload_snapshot",
+              "displayName": "payload_snapshot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1248,
+        144
+      ],
+      "id": "78f230c3-3d11-4d40-80f3-192ab9215fcd",
+      "name": "Move to Dead-Letter (Exhausted)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -528,
+        448
+      ],
+      "id": "55e781ca-2fe0-46e8-a4df-8b809ddbf990",
+      "name": "Daily Reliability Digest"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss",
+          "mode": "list",
+          "cachedResultName": "Error Log",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -304,
+        448
+      ],
+      "id": "d49b7d97-b65b-4de5-93d1-a2c01184548e",
+      "name": "Load Error Log Data",
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allErrors = $input.all().map(item => item.json);\n\n// 1. Total failed executions\nconst totalFailed = allErrors.length;\n\n// 2. Automatically recovered executions (status = 'resolved')\nconst recovered = allErrors.filter(e => e.status === 'resolved').length;\n\n// 3. Dead-letter count (status = 'dead_letter' or 'exhausted_retries')\nconst deadLetterCount = allErrors.filter(e => \n  e.status === 'dead_letter' || e.status === 'exhausted_retries'\n).length;\n\n// 4. Critical authentication failures (error_category = authentication_or_permission)\nconst criticalAuthFailures = allErrors.filter(e => \n  e.error_category === 'authentication_or_permission'\n).length;\n\n// 5. Top failing workflows (count by workflow_name)\nconst workflowCounts = {};\nallErrors.forEach(e => {\n  const name = e.workflow_name || 'Unknown';\n  workflowCounts[name] = (workflowCounts[name] || 0) + 1;\n});\nconst topFailingWorkflows = Object.entries(workflowCounts)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([name, count]) => `${name} (${count})`)\n  .join(', ');\n\n// 6. Top failing nodes (count by failed_node)\nconst nodeCounts = {};\nallErrors.forEach(e => {\n  const node = e.failed_node || 'Unknown';\n  nodeCounts[node] = (nodeCounts[node] || 0) + 1;\n});\nconst topFailingNodes = Object.entries(nodeCounts)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([node, count]) => `${node} (${count})`)\n  .join(', ');\n\n// 7. Oldest unresolved error (status != 'resolved')\nconst unresolved = allErrors.filter(e => e.status !== 'resolved' && e.created_at);\nlet oldestUnresolved = null;\nif (unresolved.length > 0) {\n  oldestUnresolved = unresolved.reduce((oldest, e) => {\n    return new Date(e.created_at) < new Date(oldest.created_at) ? e : oldest;\n  });\n}\n\nreturn [{\n  json: {\n    report_date: new Date().toISOString().split('T')[0],\n    total_failed_executions: totalFailed,\n    recovered_executions: recovered,\n    dead_letter_count: deadLetterCount,\n    critical_auth_failures: criticalAuthFailures,\n    top_failing_workflows: topFailingWorkflows || 'None',\n    top_failing_nodes: topFailingNodes || 'None',\n    oldest_unresolved_error_id: oldestUnresolved?.error_id || null,\n    oldest_unresolved_created_at: oldestUnresolved?.created_at || null,\n    generated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        448
+      ],
+      "id": "2263d2b5-1f3a-4eba-85be-31e9d0e014a6",
+      "name": "Calculate Daily Digest Metrics"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\nconst report = `\nDAILY RELIABILITY DIGEST\n=========================\nReport Date: ${data.report_date}\n\nFAILURE SUMMARY\n----------------\nTotal Failed Executions: ${data.total_failed_executions}\nAutomatically Recovered: ${data.recovered_executions}\nDead-Letter Count: ${data.dead_letter_count}\nCritical Authentication Failures: ${data.critical_auth_failures}\n\nTOP FAILING WORKFLOWS\n----------------------\n${data.top_failing_workflows}\n\nTOP FAILING NODES\n------------------\n${data.top_failing_nodes}\n\nOLDEST UNRESOLVED ERROR\n------------------------\nError ID: ${data.oldest_unresolved_error_id || 'None'}\nOccurred At: ${data.oldest_unresolved_created_at || 'N/A'}\n\nLINK TO RETRY & DEAD-LETTER TABLE\n-----------------------------------\nhttps://docs.google.com/spreadsheets/d/1o1XgUeKuvnvJ2qmORxW2B--UDZZ_qjFRuIH0eXvEvss/edit\n\nGenerated At: ${data.generated_at}\n`;\n\nreturn [{\n  json: {\n    ...data,\n    report_text: report.trim()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        448
+      ],
+      "id": "632aca19-4f63-4af0-8664-802635603a38",
+      "name": "Format Digest Report"
+    },
+    {
+      "parameters": {
+        "sendTo": "kzarsalan3@gmail.com",
+        "subject": "=Daily Reliability Digest - {{ $json.report_date }}",
+        "message": "=<pre>{{ $json.report_text }}</pre>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        368,
+        448
+      ],
+      "id": "13491dec-8b5e-4ea5-8bc6-7e497d539d3c",
+      "name": "Send Digest Email",
+      "webhookId": "17276274-f191-4a84-96f8-bd6ceaa7c14e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "EusB1TZilQXg3t9b",
+          "name": "Gmail account 23"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1Q25Kq_JK9ydwGS8J7ovGae6n7sG7S4m5tGr5cDnvp6I",
+          "mode": "list",
+          "cachedResultName": "DigestLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Q25Kq_JK9ydwGS8J7ovGae6n7sG7S4m5tGr5cDnvp6I/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Q25Kq_JK9ydwGS8J7ovGae6n7sG7S4m5tGr5cDnvp6I/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "report_date": "={{ $('Format Digest Report').item.json.report_date }}",
+            "total_failed_executions": "={{ $('Format Digest Report').item.json.total_failed_executions }}",
+            "recovered_executions": "={{ $('Format Digest Report').item.json.recovered_executions }}",
+            "dead_letter_count": "={{ $('Format Digest Report').item.json.dead_letter_count }}",
+            "critical_auth_failures": "={{ $('Format Digest Report').item.json.critical_auth_failures }}",
+            "top_failing_workflows": "={{ $('Format Digest Report').item.json.top_failing_workflows }}",
+            "top_failing_nodes": "={{ $('Format Digest Report').item.json.top_failing_nodes }}",
+            "oldest_unresolved_error_id": "={{ $('Format Digest Report').item.json.oldest_unresolved_error_id }}",
+            "generated_at": "={{ $('Format Digest Report').item.json.generated_at }}"
+          },
+          "matchingColumns": [
+            "report_date"
+          ],
+          "schema": [
+            {
+              "id": "report_date",
+              "displayName": "report_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total_failed_executions",
+              "displayName": "total_failed_executions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recovered_executions",
+              "displayName": "recovered_executions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "dead_letter_count",
+              "displayName": "dead_letter_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "critical_auth_failures",
+              "displayName": "critical_auth_failures",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "top_failing_workflows",
+              "displayName": "top_failing_workflows",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "top_failing_nodes",
+              "displayName": "top_failing_nodes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "oldest_unresolved_error_id",
+              "displayName": "oldest_unresolved_error_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "generated_at",
+              "displayName": "generated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        592,
+        448
+      ],
+      "id": "a2d92700-b806-4b00-8381-5252421caf24",
+      "name": "Save Digest Log",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gml6w6xc7PBsxQRc",
+          "name": "Google Sheets account 19"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Error Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Error Payload": {
+      "main": [
+        [
+          {
+            "node": "Create Error Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Error Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "Classify Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Error": {
+      "main": [
+        [
+          {
+            "node": "Determine Retry Safety",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Retry Safety": {
+      "main": [
+        [
+          {
+            "node": "Duplicate Alert Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate Alert Check": {
+      "main": [
+        [
+          {
+            "node": "Check 30-Minute Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate Alert?": {
+      "main": [
+        [
+          {
+            "node": "Update Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare New Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare New Error": {
+      "main": [
+        [
+          {
+            "node": "Create Error Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Retry Safe?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save Error Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Safe?": {
+      "main": [
+        [
+          {
+            "node": "Calculate Exponential Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dead-Letter Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Worker": {
+      "main": [
+        [
+          {
+            "node": "Get Retry Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Retry Queue": {
+      "main": [
+        [
+          {
+            "node": "Filter Due Retries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Due Retries": {
+      "main": [
+        [
+          {
+            "node": "Claim Retry Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Retry Record": {
+      "main": [
+        [
+          {
+            "node": "Load Error Log Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Error Log Record": {
+      "main": [
+        [
+          {
+            "node": "Determine Replay Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check 30-Minute Window": {
+      "main": [
+        [
+          {
+            "node": "Duplicate Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Error Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Critical Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Exponential Backoff": {
+      "main": [
+        [
+          {
+            "node": "Retry Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Replay Workflow": {
+      "main": [
+        [
+          {
+            "node": "Execute Replay Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Replay Workflow": {
+      "main": [
+        [
+          {
+            "node": "Mark as Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Attempt Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Attempt Limit": {
+      "main": [
+        [
+          {
+            "node": "Calculate Exponential Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move to Dead-Letter (Exhausted)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Reliability Digest": {
+      "main": [
+        [
+          {
+            "node": "Load Error Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Error Log Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Daily Digest Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Daily Digest Metrics": {
+      "main": [
+        [
+          {
+            "node": "Format Digest Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest Report": {
+      "main": [
+        [
+          {
+            "node": "Send Digest Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Digest Email": {
+      "main": [
+        [
+          {
+            "node": "Save Digest Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "timezone": "Asia/Karachi",
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "versionId": "1d6df896-fb66-417b-a1bf-cadcc0fa3bd7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "36e5b8acffef6d9e199c770a496fc034332fcb50e464bcb97692c27f5a41e6f9"
+  },
+  "nodeGroups": [],
+  "id": "hNuMUg2wA1g6Khnn",
+  "tags": []
+}
