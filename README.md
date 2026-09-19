@@ -50,18 +50,26 @@ A production-grade, centralized error handling and resilience engine built for *
 
 ---
 
-## ⚡ Features & System Capabilities
+## 📋 Standardized Error Schema
 
-| Feature | Description |
-| :--- | :--- |
-| 🧹 **Payload Normalization** | Converts raw n8n execution errors into a standardized schema across all workflows. |
-| 🔑 **Regex Fingerprinting** | Strips timestamps, alphanumeric IDs, and numbers to group identical recurring error signatures. |
-| 🔕 **30-Min Dedup Window** | Prevents inbox flooding by muting duplicate notifications for repeated error signatures within 30 minutes. |
-| 🛑 **Idempotency Safeguard** | Blocks automatic retries on non-idempotent operations (payments, SMS, lead assignment) to protect data integrity. |
-| 📈 **Exponential Backoff** | Dynamically calculates progressive delay intervals ($2^{\text{attempt}-1}$) capped at a maximum of 4 retry attempts. |
-| 📦 **Dead-Letter Isolation** | Automatically routes non-retryable errors (e.g., HTTP 400, 401, 403) and exhausted retries to the DLQ tab. |
-| 📊 **Daily Health Digest** | Compiles daily metrics (Total Errors, Recovered Runs, DLQ Counts) and dispatches an HTML summary digest. |
-
+```json
+{
+  "error_id": "err_1789739918996_b2fdfb",
+  "workflow_name": "Example Workflow",
+  "workflow_execution_id": "1",
+  "source_execution_id": 231,
+  "failed_node": "Node With Error",
+  "http_status": 0,
+  "error_category": "workflow_error",
+  "severity": "medium",
+  "retryable": false,
+  "retry_safe": false,
+  "attempt_number": 0,
+  "next_retry_at": "",
+  "error_fingerprint": "ERR-1896325556",
+  "status": "queued",
+  "created_at": "2026-09-18T13:58:38.996Z"
+}
 ---
 
 <h2>🚨 Error Routing & Handling Rules</h2>
@@ -283,8 +291,9 @@ A production-grade, centralized error handling and resilience engine built for *
 
 <p>MIT License — Free to use, modify, and deploy for personal or commercial projects.</p>
 
-<hr/>
 
-<h2>📜 License</h2>
 
-<p>MIT License — Free to use, modify, and deploy for personal or commercial projects.</p>
+
+
+
+
