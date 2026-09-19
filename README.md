@@ -50,28 +50,6 @@ A production-grade, centralized error handling and resilience engine built for *
 
 ---
 
-## 📋 Standardized Error Schema
-
-```json
-{
-  "error_id": "err_1789739918996_b2fdfb",
-  "workflow_name": "Example Workflow",
-  "workflow_execution_id": "1",
-  "source_execution_id": 231,
-  "failed_node": "Node With Error",
-  "http_status": 0,
-  "error_category": "workflow_error",
-  "severity": "medium",
-  "retryable": false,
-  "retry_safe": false,
-  "attempt_number": 0,
-  "next_retry_at": "",
-  "error_fingerprint": "ERR-1896325556",
-  "status": "queued",
-  "created_at": "2026-09-18T13:58:38.996Z"
-}
----
-
 <h2>🚨 Error Routing & Handling Rules</h2>
 
 <table>
@@ -290,6 +268,26 @@ A production-grade, centralized error handling and resilience engine built for *
 <h2>📜 License</h2>
 
 <p>MIT License — Free to use, modify, and deploy for personal or commercial projects.</p>
+---
+## 📋 Standardized Error Schema 
+
+```json
+{ "error_id": "err_1789739918996_b2fdfb",
+"workflow_name": "Example Workflow",
+"workflow_execution_id": "1",
+"source_execution_id": 231 "failed_node": "Node With Error",
+"http_status": 0,
+"error_category": "workflow_error",
+"severity": "medium",
+"retryable": false,
+"retry_safe": false,
+"attempt_number": 0,
+"next_retry_at": "",
+"error_fingerprint": "ERR-1896325556",
+"status": "queued",
+"created_at": "2026-09-18T13:58:38.996Z" }
+
+
 
 
 
